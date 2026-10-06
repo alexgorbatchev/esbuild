@@ -9,9 +9,9 @@ const firstHighSurrogate = 0xD800
 const firstLowSurrogate = 0xDC00
 const lastLowSurrogate = 0xDFFF
 
-func canPrintWithoutEscape(c rune, asciiOnly bool) bool {
+func canPrintWithoutEscape(c rune, asciiOnly bool, quoteChar byte) bool {
 	if c <= lastASCII {
-		return c >= firstASCII && c != '\\' && c != '"'
+		return c >= firstASCII && c != '\\' && c != rune(quoteChar)
 	} else {
 		return !asciiOnly && c != '\uFEFF' && (c < firstHighSurrogate || c > lastLowSurrogate)
 	}
@@ -29,7 +29,7 @@ func internalQuote(text string, asciiOnly bool, quoteChar byte) []byte {
 	// Estimate the required length
 	lenEstimate := 2
 	for _, c := range text {
-		if canPrintWithoutEscape(c, asciiOnly) {
+		if canPrintWithoutEscape(c, asciiOnly, quoteChar) {
 			lenEstimate += utf8.RuneLen(c)
 		} else {
 			switch c {
@@ -63,12 +63,12 @@ func internalQuote(text string, asciiOnly bool, quoteChar byte) []byte {
 		c, width := DecodeWTF8Rune(text[i:])
 
 		// Fast path: a run of characters that don't need escaping
-		if canPrintWithoutEscape(c, asciiOnly) {
+		if canPrintWithoutEscape(c, asciiOnly, quoteChar) {
 			start := i
 			i += width
 			for i < n {
 				c, width = DecodeWTF8Rune(text[i:])
-				if !canPrintWithoutEscape(c, asciiOnly) {
+				if !canPrintWithoutEscape(c, asciiOnly, quoteChar) {
 					break
 				}
 				i += width

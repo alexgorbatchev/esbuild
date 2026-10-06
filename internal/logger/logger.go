@@ -357,7 +357,7 @@ func PlatformIndependentPathDirBaseExt(path string) (dir string, base string, ex
 	if len(path) > 0 && (path[0] == '/' || path[0] == '\\') {
 		absRootSlash = 0 // Unix
 	} else if len(path) > 2 && path[1] == ':' && (path[2] == '/' || path[2] == '\\') {
-		if c := path[0]; (c >= 'a' && c < 'z') || (c >= 'A' && c <= 'Z') {
+		if c := path[0]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
 			absRootSlash = 2 // Windows
 		}
 	}
@@ -1928,6 +1928,7 @@ func GenerateStringInJSTable(outerContents string, outerStringLiteralLoc Loc, in
 		}
 
 		c, width := utf8.DecodeRuneInString(innerContents[i:])
+		innerRune := c
 
 		// Compress the table using run-length encoding
 		table = append(table, StringInJSTableEntry{innerLine: line, innerColumn: column, innerLoc: Loc{Start: i}, outerLoc: loc})
@@ -1966,19 +1967,44 @@ func GenerateStringInJSTable(outerContents string, outerStringLiteralLoc Loc, in
 			switch c {
 			case 'x':
 				// 2-digit hexadecimal
-				loc.Start += 1 + 2
+				loc.Start += 2 + 2
 
-			case 'u':
-				loc.Start++
-				if outerContents[loc.Start] == '{' {
-					// Variable-length
-					for outerContents[loc.Start] != '}' {
+			case '0', '1', '2', '3', '4', '5', '6', '7':
+				// Valid legacy octal uses up to three digits for 0-3,
+				// and up to two digits for 4-7.
+				loc.Start += 2
+				if next := outerContents[loc.Start]; next >= '0' && next <= '7' {
+					loc.Start++
+					if next := outerContents[loc.Start]; c <= '3' && next >= '0' && next <= '7' {
 						loc.Start++
 					}
-					loc.Start++
-				} else {
-					// Fixed-length
-					loc.Start += 4
+				}
+
+			case 'u':
+				// A decoded non-BMP rune may come from one braced code point
+				// or two escaped UTF-16 surrogate code units.
+				unitsRemaining := 1
+				if innerRune > 0xFFFF {
+					unitsRemaining = 2
+				}
+				for unitsRemaining > 0 {
+					loc.Start += 2 // Skip the backslash and u.
+					if outerContents[loc.Start] == '{' {
+						loc.Start++
+						start := loc.Start
+						for outerContents[loc.Start] != '}' {
+							loc.Start++
+						}
+						// Valid hex with more than four significant digits
+						// represents both UTF-16 code units at once.
+						if len(strings.TrimLeft(outerContents[start:loc.Start], "0")) > 4 {
+							unitsRemaining--
+						}
+						loc.Start++
+					} else {
+						loc.Start += 4
+					}
+					unitsRemaining--
 				}
 
 			case '\n', '\r', '\u2028', '\u2029':
@@ -2003,7 +2029,7 @@ func RemapStringInJSLoc(table []StringInJSTableEntry, innerLoc Loc) Loc {
 		step := count / 2
 		i := index + step
 		if i+1 < len(table) {
-			if entry := table[i+1]; entry.innerLoc.Start < innerLoc.Start {
+			if entry := table[i+1]; entry.innerLoc.Start <= innerLoc.Start {
 				index = i + 1
 				count -= step + 1
 				continue

@@ -211,6 +211,15 @@ type FS interface {
 	WatchData() WatchData
 }
 
+// ReadOnlyFileSystem supplies compiler inputs without consulting native storage.
+// Paths use the host platform's native absolute path semantics.
+type ReadOnlyFileSystem interface {
+	ReadFile(path string) ([]byte, error)
+	ReadDir(path string) ([]string, error)
+	Lstat(path string) (os.FileInfo, error)
+	Readlink(path string) (string, error)
+}
+
 type WatchData struct {
 	// These functions return a non-empty path as a string if the file system
 	// entry has been modified. For files, the returned path is the same as the

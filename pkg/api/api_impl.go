@@ -892,6 +892,7 @@ func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 	absWorkingDir := buildOpts.AbsWorkingDir
 	realFS, err := fs.RealFS(fs.RealFSOptions{
 		AbsWorkingDir: absWorkingDir,
+		InputFS:       buildOpts.InputFS,
 
 		// This is a long-lived file system object so do not cache calls to
 		// ReadDirectory() (they are normally cached for the duration of a build
@@ -935,6 +936,7 @@ func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 	}
 
 	args := rebuildArgs{
+		inputFS:            buildOpts.InputFS,
 		caches:             caches,
 		onEndCallbacks:     onEndCallbacks,
 		onDisposeCallbacks: onDisposeCallbacks,
@@ -1073,6 +1075,9 @@ func (ctx *internalContext) Rebuild() BuildResult {
 func (ctx *internalContext) Watch(options WatchOptions) error {
 	ctx.mutex.Lock()
 	defer ctx.mutex.Unlock()
+	if ctx.args.inputFS != nil {
+		return errors.New("Injected read-only filesystem does not support watch mode")
+	}
 
 	// Ignore disposed contexts
 	if ctx.didDispose {
@@ -1155,11 +1160,13 @@ func (ctx *internalContext) Dispose() {
 	build := ctx.activeBuild
 	ctx.mutex.Unlock()
 
-	if ctx.watcher != nil {
-		ctx.watcher.stop()
-	}
+	// Close event-stream connections before joining the watcher: a watched
+	// rebuild may be waiting to deliver to a backpressured HTTP response.
 	if ctx.handler != nil {
 		ctx.handler.stop()
+	}
+	if ctx.watcher != nil {
+		ctx.watcher.stop()
 	}
 
 	// It's important to wait for the build to finish before returning. The JS
@@ -1247,6 +1254,7 @@ func validateBuildOptions(
 	platform := validatePlatform(buildOpts.Platform)
 	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure, platform, true /* isBuildAPI */, minify, buildOpts.Drop)
 	options = config.Options{
+		IgnoreInputSourceMaps:              buildOpts.IgnoreInputSourceMaps,
 		CSSPrefixData:                      cssPrefixData,
 		UnsupportedJSFeatures:              jsFeatures.ApplyOverrides(jsOverrides, jsMask),
 		UnsupportedCSSFeatures:             cssFeatures.ApplyOverrides(cssOverrides, cssMask),
@@ -1316,6 +1324,28 @@ func validateBuildOptions(
 		CSSBanner:             bannerCSS,
 		CSSFooter:             footerCSS,
 		PreserveSymlinks:      buildOpts.PreserveSymlinks,
+	}
+	if buildOpts.InputFS != nil && buildOpts.Write {
+		log.AddError(nil, logger.Range{}, "Injected read-only filesystem requires Write: false")
+	}
+	if buildOpts.DefineForFile != nil {
+		if len(injectedDefines) != 0 {
+			log.AddError(nil, logger.Range{}, "Per-file defines cannot be combined with injected object defines")
+		}
+		options.DefinesForFile = func(path string) *config.ProcessedDefines {
+			merged := make(map[string]string, len(buildOpts.Define))
+			for key, value := range buildOpts.Define {
+				merged[key] = value
+			}
+			for key, value := range buildOpts.DefineForFile(path) {
+				merged[key] = value
+			}
+			processed, injected := validateDefines(log, merged, buildOpts.Pure, platform, true, minify, buildOpts.Drop)
+			if len(injected) != 0 {
+				log.AddError(nil, logger.Range{}, "Per-file defines require constants or identifiers, not injected objects")
+			}
+			return processed
+		}
 	}
 	validateKeepNames(log, &options)
 	if buildOpts.Conditions != nil {
@@ -1446,6 +1476,7 @@ type onEndCallback struct {
 }
 
 type rebuildArgs struct {
+	inputFS            fs.ReadOnlyFileSystem
 	caches             *cache.CacheSet
 	onEndCallbacks     []onEndCallback
 	onDisposeCallbacks []func()
@@ -1475,6 +1506,7 @@ func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, m
 	// Convert and validate the buildOpts
 	realFS, err := fs.RealFS(fs.RealFSOptions{
 		AbsWorkingDir: args.absWorkingDir,
+		InputFS:       args.inputFS,
 		WantWatchData: args.options.WatchMode,
 	})
 	if err != nil {

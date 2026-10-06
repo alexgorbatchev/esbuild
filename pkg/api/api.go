@@ -79,6 +79,7 @@ package api
 import (
 	"time"
 
+	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
@@ -277,12 +278,18 @@ const (
 ////////////////////////////////////////////////////////////////////////////////
 // Build API
 
+type ReadOnlyFileSystem = fs.ReadOnlyFileSystem
+
 type BuildOptions struct {
-	Color       StderrColor         // Documentation: https://esbuild.github.io/api/#color
-	LogLevel    LogLevel            // Documentation: https://esbuild.github.io/api/#log-level
-	LogLimit    int                 // Documentation: https://esbuild.github.io/api/#log-limit
-	LogOverride map[string]LogLevel // Documentation: https://esbuild.github.io/api/#log-override
-	AbsPaths    AbsPaths            // Documentation: https://esbuild.github.io/api/#abs-path
+	InputFS               ReadOnlyFileSystem
+	IgnoreInputSourceMaps bool
+	// DefineForFile permits only native constant/identifier defines, without injected object literals.
+	DefineForFile func(path string) map[string]string
+	Color         StderrColor         // Documentation: https://esbuild.github.io/api/#color
+	LogLevel      LogLevel            // Documentation: https://esbuild.github.io/api/#log-level
+	LogLimit      int                 // Documentation: https://esbuild.github.io/api/#log-limit
+	LogOverride   map[string]LogLevel // Documentation: https://esbuild.github.io/api/#log-override
+	AbsPaths      AbsPaths            // Documentation: https://esbuild.github.io/api/#abs-path
 
 	Sourcemap      SourceMap      // Documentation: https://esbuild.github.io/api/#sourcemap
 	SourceRoot     string         // Documentation: https://esbuild.github.io/api/#source-root

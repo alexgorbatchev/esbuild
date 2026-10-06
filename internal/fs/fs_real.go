@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -57,13 +58,17 @@ type privateWatchData struct {
 }
 
 type RealFSOptions struct {
+	InputFS       ReadOnlyFileSystem
 	AbsWorkingDir string
 	WantWatchData bool
 	DoNotCache    bool
 }
 
 func RealFS(options RealFSOptions) (FS, error) {
-	var fp goFilepath
+	fp := goFilepath{input: options.InputFS}
+	if options.InputFS != nil && (options.AbsWorkingDir == "" || options.WantWatchData) {
+		return nil, fmt.Errorf("Injected read-only filesystem requires an absolute working directory and does not support watch mode")
+	}
 	if CheckIfWindows() {
 		fp.isWindows = true
 		fp.pathSeparator = '\\'
@@ -199,7 +204,12 @@ func (fs *realFS) ReadDirectory(dir string) (entries DirEntries, canonicalError 
 func (fs *realFS) ReadFile(path string) (contents string, canonicalError error, originalError error) {
 	BeforeFileOpen()
 	defer AfterFileClose()
-	buffer, originalError := ioutil.ReadFile(path)
+	var buffer []byte
+	if fs.fp.input != nil {
+		buffer, originalError = fs.fp.input.ReadFile(path)
+	} else {
+		buffer, originalError = ioutil.ReadFile(path)
+	}
 	canonicalError = fs.canonicalizeError(originalError)
 
 	// Allocate the string once
@@ -259,6 +269,13 @@ func (f *realOpenedFile) Close() error {
 }
 
 func (fs *realFS) OpenFile(path string) (OpenedFile, error, error) {
+	if fs.fp.input != nil {
+		contents, canonicalError, originalError := fs.ReadFile(path)
+		if canonicalError != nil {
+			return nil, canonicalError, originalError
+		}
+		return &InMemoryOpenedFile{Contents: []byte(contents)}, nil, nil
+	}
 	BeforeFileOpen()
 	defer AfterFileClose()
 
@@ -277,6 +294,9 @@ func (fs *realFS) OpenFile(path string) (OpenedFile, error, error) {
 }
 
 func (fs *realFS) ModKey(path string) (ModKey, error) {
+	if fs.fp.input != nil {
+		return ModKey{}, modKeyUnusable
+	}
 	BeforeFileOpen()
 	defer AfterFileClose()
 	key, err := modKey(path)
@@ -348,6 +368,10 @@ func (fs *realFS) EvalSymlinks(path string) (string, bool) {
 }
 
 func (fs *realFS) readdir(dirname string) (entries []string, canonicalError error, originalError error) {
+	if fs.fp.input != nil {
+		entries, originalError = fs.fp.input.ReadDir(dirname)
+		return entries, fs.canonicalizeError(originalError), originalError
+	}
 	BeforeFileOpen()
 	defer AfterFileClose()
 	f, originalError := os.Open(dirname)
@@ -382,6 +406,16 @@ func (fs *realFS) readdir(dirname string) (entries []string, canonicalError erro
 }
 
 func (fs *realFS) canonicalizeError(err error) error {
+	if fs.fp.input != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return syscall.ENOENT
+		case errors.Is(err, os.ErrPermission):
+			return syscall.EACCES
+		case errors.Is(err, os.ErrInvalid):
+			return syscall.EINVAL
+		}
+	}
 	// Unwrap to get the underlying error
 	if pathErr, ok := err.(*os.PathError); ok {
 		err = pathErr.Unwrap()
@@ -412,7 +446,7 @@ func (fs *realFS) kind(dir string, base string) (symlink string, kind EntryKind)
 	// Use "lstat" since we want information about symbolic links
 	BeforeFileOpen()
 	defer AfterFileClose()
-	stat, err := os.Lstat(entryPath)
+	stat, err := fs.fp.lstat(entryPath)
 	if err != nil {
 		return
 	}
@@ -426,7 +460,7 @@ func (fs *realFS) kind(dir string, base string) (symlink string, kind EntryKind)
 		}
 
 		// Re-run "lstat" on the symlink target to see if it's a file or not
-		stat2, err2 := os.Lstat(link)
+		stat2, err2 := fs.fp.lstat(link)
 		if err2 != nil {
 			return // Skip over this entry
 		}

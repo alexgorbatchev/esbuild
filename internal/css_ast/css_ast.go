@@ -1461,7 +1461,7 @@ func (ss *SSPseudoClass) Hash() uint32 {
 func (ss *SSPseudoClass) Clone() SS {
 	clone := *ss
 	if ss.Args != nil {
-		ss.Args = CloneTokensWithoutImportRecords(ss.Args)
+		clone.Args = CloneTokensWithoutImportRecords(ss.Args)
 	}
 	return &clone
 }

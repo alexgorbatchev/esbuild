@@ -42,6 +42,7 @@ import (
 )
 
 type goFilepath struct {
+	input         ReadOnlyFileSystem
 	cwd           string
 	isWindows     bool
 	pathSeparator byte
@@ -225,7 +226,7 @@ func (fp goFilepath) evalSymlinks(path string) (string, error) {
 
 		// Resolve symlink.
 
-		fi, err := os.Lstat(dest)
+		fi, err := fp.lstat(dest)
 		if err != nil {
 			return "", err
 		}
@@ -244,7 +245,7 @@ func (fp goFilepath) evalSymlinks(path string) (string, error) {
 			return "", errors.New("EvalSymlinks: too many links")
 		}
 
-		link, err := os.Readlink(dest)
+		link, err := fp.readlink(dest)
 		if err != nil {
 			return "", err
 		}

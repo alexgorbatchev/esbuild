@@ -34,3 +34,4 @@
 bin
 esbuild.exe
 node_modules/
+/.tmp/

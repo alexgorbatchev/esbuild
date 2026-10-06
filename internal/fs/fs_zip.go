@@ -19,6 +19,7 @@ package fs
 
 import (
 	"archive/zip"
+	"bytes"
 	"io/ioutil"
 	"strconv"
 	"strings"
@@ -34,8 +35,9 @@ type zipFS struct {
 }
 
 type zipFile struct {
-	reader *zip.ReadCloser
-	err    error
+	reader       *zip.Reader
+	nativeReader *zip.ReadCloser
+	err          error
 
 	dirs  map[string]*compressedDir
 	files map[string]*compressedFile
@@ -90,7 +92,7 @@ func (fs *zipFS) checkForZip(path string, kind EntryKind) (*zipFile, string) {
 		defer archive.wait.Done()
 
 		// Try reading the zip archive if it's not in the cache
-		tryToReadZipArchive(zipPath, archive)
+		tryToReadZipArchive(fs.inner, zipPath, archive)
 	}
 
 	if archive.err != nil {
@@ -99,11 +101,28 @@ func (fs *zipFS) checkForZip(path string, kind EntryKind) (*zipFile, string) {
 	return archive, pathTail
 }
 
-func tryToReadZipArchive(zipPath string, archive *zipFile) {
-	reader, err := zip.OpenReader(zipPath)
-	if err != nil {
-		archive.err = err
-		return
+func tryToReadZipArchive(inner FS, zipPath string, archive *zipFile) {
+	var reader *zip.Reader
+	if real, ok := inner.(*realFS); ok && real.fp.input == nil {
+		native, err := zip.OpenReader(zipPath)
+		if err != nil {
+			archive.err = err
+			return
+		}
+		archive.nativeReader = native
+		reader = &native.Reader
+	} else {
+		contents, err, _ := inner.ReadFile(zipPath)
+		if err != nil {
+			archive.err = err
+			return
+		}
+		var readErr error
+		reader, readErr = zip.NewReader(bytes.NewReader([]byte(contents)), int64(len(contents)))
+		if readErr != nil {
+			archive.err = readErr
+			return
+		}
 	}
 
 	dirs := make(map[string]*compressedDir)

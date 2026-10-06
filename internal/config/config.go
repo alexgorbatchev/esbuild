@@ -398,12 +398,14 @@ func (flag *CancelFlag) DidCancel() bool {
 }
 
 type Options struct {
-	ModuleTypeData js_ast.ModuleTypeData
-	Defines        *ProcessedDefines
-	TSAlwaysStrict *TSAlwaysStrict
-	MangleProps    *regexp.Regexp
-	ReserveProps   *regexp.Regexp
-	CancelFlag     *CancelFlag
+	DefinesForFile        func(path string) *ProcessedDefines
+	IgnoreInputSourceMaps bool
+	ModuleTypeData        js_ast.ModuleTypeData
+	Defines               *ProcessedDefines
+	TSAlwaysStrict        *TSAlwaysStrict
+	MangleProps           *regexp.Regexp
+	ReserveProps          *regexp.Regexp
+	CancelFlag            *CancelFlag
 
 	// When mangling property names, call this function with a callback and do
 	// the property name mangling inside the callback. The callback takes an

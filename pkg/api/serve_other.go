@@ -51,9 +51,15 @@ type apiHandler struct {
 	hosts            []string
 	corsOrigin       []string
 	serveWaitGroup   sync.WaitGroup
-	activeStreams    []chan serverSentEvent
+	activeStreams    []*serverSentStream
+	stopped          bool
 	currentHashes    map[string]string
 	mutex            sync.Mutex
+}
+
+type serverSentStream struct {
+	events  chan serverSentEvent
+	stopped chan struct{}
 }
 
 type serverSentEvent struct {
@@ -399,73 +405,75 @@ func (h *apiHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 // This exposes an event stream to clients using server-sent events:
 // https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events
 func (h *apiHandler) serveEventStream(start time.Time, req *http.Request, res http.ResponseWriter) {
-	if flusher, ok := res.(http.Flusher); ok {
-		if closer, ok := res.(http.CloseNotifier); ok {
-			// Add a new stream to the array of active streams
-			stream := make(chan serverSentEvent)
-			h.mutex.Lock()
-			h.activeStreams = append(h.activeStreams, stream)
+	if _, ok := res.(http.Flusher); ok {
+		response := http.NewResponseController(res)
+		stream := &serverSentStream{
+			events:  make(chan serverSentEvent),
+			stopped: make(chan struct{}),
+		}
+		h.mutex.Lock()
+		if h.stopped {
 			h.mutex.Unlock()
-
-			// Start the event stream
-			res.Header().Set("Content-Type", "text/event-stream")
-			res.Header().Set("Connection", "keep-alive")
-			res.Header().Set("Cache-Control", "no-cache")
-			go h.notifyRequest(time.Since(start), req, http.StatusOK)
-			res.WriteHeader(http.StatusOK)
-			res.Write([]byte("retry: 500\n"))
-			flusher.Flush()
-
-			// Send incoming messages over the stream
-			streamWasClosed := make(chan struct{}, 1)
-			go func() {
-				for {
-					var msg []byte
-					select {
-					case next, ok := <-stream:
-						if !ok {
-							streamWasClosed <- struct{}{}
-							return
-						}
-						msg = []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", next.event, next.data))
-					case <-time.After(30 * time.Second):
-						// Send an occasional keep-alive
-						msg = []byte(":\n\n")
-					}
-					if _, err := res.Write(msg); err != nil {
-						return
-					}
-					flusher.Flush()
-				}
-			}()
-
-			// When the stream is closed (either by them or by us), remove it
-			// from the array and end the response body to clean up resources
-			select {
-			case <-closer.CloseNotify():
-			case <-streamWasClosed:
-			}
+			go h.notifyRequest(time.Since(start), req, http.StatusServiceUnavailable)
+			http.Error(res, "503 - Service Unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		h.activeStreams = append(h.activeStreams, stream)
+		h.mutex.Unlock()
+		defer func() {
+			// Signal before taking the mutex: a broadcaster may be waiting to
+			// deliver under the same mutex after this response writer has stopped.
+			close(stream.stopped)
 			h.mutex.Lock()
 			for i := range h.activeStreams {
 				if h.activeStreams[i] == stream {
-					end := len(h.activeStreams) - 1
-					h.activeStreams[i] = h.activeStreams[end]
-					h.activeStreams = h.activeStreams[:end]
-
-					// Only close the stream if it's present in the list of active
-					// streams. Stopping the server can also call close on this
-					// stream and Go only lets you close a channel once before
-					// panicking, so we don't want to close it twice.
-					close(stream)
+					last := len(h.activeStreams) - 1
+					h.activeStreams[i] = h.activeStreams[last]
+					h.activeStreams = h.activeStreams[:last]
+					close(stream.events)
 					break
 				}
 			}
 			h.mutex.Unlock()
+		}()
+
+		res.Header().Set("Content-Type", "text/event-stream")
+		res.Header().Set("Connection", "keep-alive")
+		res.Header().Set("Cache-Control", "no-cache")
+		go h.notifyRequest(time.Since(start), req, http.StatusOK)
+		res.WriteHeader(http.StatusOK)
+		if _, err := res.Write([]byte("retry: 500\n")); err != nil {
 			return
+		}
+		if err := response.Flush(); err != nil {
+			return
+		}
+
+		// The HTTP handler is the sole response writer for its entire lifetime.
+		keepAlive := time.NewTicker(30 * time.Second)
+		defer keepAlive.Stop()
+		for {
+			var msg []byte
+			select {
+			case next, ok := <-stream.events:
+				if !ok {
+					return
+				}
+				msg = []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", next.event, next.data))
+			case <-req.Context().Done():
+				return
+			case <-keepAlive.C:
+				msg = []byte(":\n\n")
+			}
+			if _, err := res.Write(msg); err != nil {
+				return
+			}
+			if err := response.Flush(); err != nil {
+				return
+			}
 		}
 	}
 
-	// If we get here, then event streaming isn't possible
 	go h.notifyRequest(time.Since(start), req, http.StatusInternalServerError)
 	res.WriteHeader(http.StatusInternalServerError)
 	res.Write([]byte("500 - Event stream error"))
@@ -555,7 +563,10 @@ func (h *apiHandler) broadcastBuildResult(result BuildResult, newHashes map[stri
 
 		// Broadcast the diff to all streams
 		for _, stream := range h.activeStreams {
-			stream <- serverSentEvent{event: "change", data: json}
+			select {
+			case stream.events <- serverSentEvent{event: "change", data: json}:
+			case <-stream.stopped:
+			}
 		}
 	}
 
@@ -927,12 +938,17 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 
 		// Close all open event streams
 		handler.mutex.Lock()
-		for _, stream := range handler.activeStreams {
-			close(stream)
+		handler.stopped = true
+		streams := handler.activeStreams
+		for _, stream := range streams {
+			close(stream.events)
 		}
 		handler.activeStreams = nil
 		handler.mutex.Unlock()
 
+		for _, stream := range streams {
+			<-stream.stopped
+		}
 		handler.serveWaitGroup.Wait()
 	}
 
@@ -968,7 +984,9 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 	// Return an error if the server failed to start accepting connections
 	hack.waitGroup.Wait()
 	if hack.err != nil {
-		return ServeResult{}, hack.err
+		closeErr := listener.Close()
+		handler.serveWaitGroup.Wait()
+		return ServeResult{}, errors.Join(hack.err, closeErr)
 	}
 
 	// There appears to be some issue with Linux (but not with macOS) where

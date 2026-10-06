@@ -83,11 +83,13 @@ var base64 = []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 //	V    V
 //	101011
 func encodeVLQ(encoded []byte, value int) []byte {
-	var vlq int
-	if value < 0 {
-		vlq = ((-value) << 1) | 1
+	var vlq uint
+	if value == -1<<31 {
+		vlq = 1
+	} else if value < 0 {
+		vlq = (uint(-value) << 1) | 1
 	} else {
-		vlq = value << 1
+		vlq = uint(value) << 1
 	}
 
 	// Handle the common case
@@ -119,7 +121,7 @@ func encodeVLQ(encoded []byte, value int) []byte {
 
 func DecodeVLQ(encoded []byte, start int) (int, int) {
 	shift := 0
-	vlq := 0
+	var vlq uint
 
 	// Scan over the input
 	for {
@@ -129,7 +131,7 @@ func DecodeVLQ(encoded []byte, start int) (int, int) {
 		}
 
 		// Decode a single byte
-		vlq |= (index & 31) << shift
+		vlq |= uint(index&31) << shift
 		start++
 		shift += 5
 
@@ -139,8 +141,11 @@ func DecodeVLQ(encoded []byte, start int) (int, int) {
 		}
 	}
 
-	// Recover the value
-	value := vlq >> 1
+	// Recover the signed value, including ECMA-426's negative-zero encoding.
+	if vlq == 1 {
+		return -1 << 31, start
+	}
+	value := int(vlq >> 1)
 	if (vlq & 1) != 0 {
 		value = -value
 	}
@@ -156,9 +161,12 @@ func DecodeVLQUTF16(encoded []uint16) (int32, int, bool) {
 	// Scan over the input
 	current := 0
 	shift := 0
-	var vlq int32
+	var vlq uint32
 	for {
 		if current >= n {
+			return 0, 0, false
+		}
+		if encoded[current] > 0x7F {
 			return 0, 0, false
 		}
 		index := int32(bytes.IndexByte(base64, byte(encoded[current])))
@@ -167,7 +175,11 @@ func DecodeVLQUTF16(encoded []uint16) (int32, int, bool) {
 		}
 
 		// Decode a single byte
-		vlq |= (index & 31) << shift
+		digit := uint32(index & 31)
+		if (shift == 30 && digit > 3) || (shift > 30 && digit != 0) {
+			return 0, 0, false
+		}
+		vlq |= digit << shift
 		current++
 		shift += 5
 
@@ -177,8 +189,11 @@ func DecodeVLQUTF16(encoded []uint16) (int32, int, bool) {
 		}
 	}
 
-	// Recover the value
-	var value = vlq >> 1
+	// Recover the signed value after shifting the unsigned sign/magnitude.
+	if vlq == 1 {
+		return -1 << 31, current, true
+	}
+	value := int32(vlq >> 1)
 	if (vlq & 1) != 0 {
 		value = -value
 	}

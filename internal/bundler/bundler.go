@@ -638,7 +638,7 @@ func parseFile(args parseArgs) {
 		}
 
 		// Attempt to parse the source map if present
-		if loader.CanHaveSourceMap() && args.options.SourceMap != config.SourceMapNone {
+		if loader.CanHaveSourceMap() && args.options.SourceMap != config.SourceMapNone && !args.options.IgnoreInputSourceMaps {
 			var sourceMapComment logger.Span
 			switch repr := result.file.inputFile.Repr.(type) {
 			case *graph.JSRepr:
@@ -1566,6 +1566,9 @@ func (s *scanner) maybeParseFile(
 	s.visited[visitedKey] = visited
 	s.remaining++
 	optionsClone := s.options
+	if optionsClone.DefinesForFile != nil {
+		optionsClone.Defines = optionsClone.DefinesForFile(path.Text)
+	}
 	if kind != inputKindStdin {
 		optionsClone.Stdin = nil
 	}
